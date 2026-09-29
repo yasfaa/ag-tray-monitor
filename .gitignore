@@ -1,0 +1,18 @@
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Logs and temporary files
+*.log
+debug.log
+
+# Editor directories
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Backup and temp files
+*.tmp
+*.bak
