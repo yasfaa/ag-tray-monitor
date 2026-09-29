@@ -20,7 +20,7 @@ $createdNew = $false
 $script:AppMutex = New-Object System.Threading.Mutex($true, $mutexName, [ref]$createdNew)
 
 if (-not $createdNew) {
-    # Another instance is already running! Signal it to open the dashboard
+    # Another instance is already running. Signal it to open the dashboard
     try {
         $existingEvent = [System.Threading.EventWaitHandle]::OpenExisting($eventName)
         $existingEvent.Set() | Out-Null
@@ -35,10 +35,57 @@ $script:WakeupEvent = New-Object System.Threading.EventWaitHandle($false, [Syste
 # 3. Resolve Paths
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectDir = Split-Path -Parent $scriptDir
+$scriptPath = Join-Path $scriptDir "TrayApp.ps1"
 $apiScriptPath = Join-Path $scriptDir "AntigravityApi.ps1"
 $xamlPath = Join-Path $scriptDir "DashboardWindow.xaml"
 $icoPath = Join-Path $projectDir "assets\icon.ico"
 $pngPath = Join-Path $projectDir "assets\icon.png"
+
+# Windows Startup Locations
+$startupFolder = [Environment]::GetFolderPath('Startup')
+$startupShortcutPath = Join-Path $startupFolder "Antigravity Quota Monitor.lnk"
+$regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$regName = "AntigravityTrayMonitor"
+
+function Test-AutoStartEnabled {
+    $inFolder = Test-Path $startupShortcutPath
+    $inReg = [bool](Get-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue)
+    return ($inFolder -or $inReg)
+}
+
+function Set-AutoStart($enable) {
+    if ($enable) {
+        # 1. Add shortcut to Windows Startup folder
+        try {
+            $wsh = New-Object -ComObject WScript.Shell
+            $sc = $wsh.CreateShortcut($startupShortcutPath)
+            $sc.TargetPath = "powershell.exe"
+            $sc.Arguments = "-Sta -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`""
+            $sc.WorkingDirectory = $projectDir
+            $sc.Description = "Antigravity Quota Monitor"
+            $sc.IconLocation = "$icoPath,0"
+            $sc.Save()
+        } catch {}
+
+        # 2. Register in HKCU Run registry key for redundancy
+        try {
+            $cmd = "powershell.exe -Sta -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`""
+            Set-ItemProperty -Path $regPath -Name $regName -Value $cmd -ErrorAction SilentlyContinue
+        } catch {}
+    } else {
+        # Remove from Startup folder
+        try {
+            if (Test-Path $startupShortcutPath) {
+                Remove-Item -Path $startupShortcutPath -Force -ErrorAction SilentlyContinue
+            }
+        } catch {}
+
+        # Remove from Registry
+        try {
+            Remove-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue
+        } catch {}
+    }
+}
 
 # Import API module
 . $apiScriptPath
@@ -69,6 +116,7 @@ $txtUserName   = $window.FindName("txtUserName")
 $txtUserEmail  = $window.FindName("txtUserEmail")
 $txtPlanBadge  = $window.FindName("txtPlanBadge")
 $txtLastUpdate = $window.FindName("txtLastUpdated")
+$chkAutoStart  = $window.FindName("chkAutoStart")
 
 # Gemini Controls
 $txtGemini5hPct   = $window.FindName("txtGemini5hPct")
@@ -133,10 +181,9 @@ $contextMenu.Items.Add($menuInterval) | Out-Null
 $contextMenu.Items.Add("-") | Out-Null
 
 $menuStartup = New-Object System.Windows.Forms.ToolStripMenuItem("Start with Windows")
-$regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$regName = "AntigravityTrayMonitor"
-$isStartupEnabled = [bool](Get-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue)
-$menuStartup.Checked = $isStartupEnabled
+$isStartupInit = Test-AutoStartEnabled
+$menuStartup.Checked = $isStartupInit
+if ($chkAutoStart) { $chkAutoStart.IsChecked = $isStartupInit }
 $contextMenu.Items.Add($menuStartup) | Out-Null
 
 $contextMenu.Items.Add("-") | Out-Null
@@ -250,6 +297,16 @@ $window.Add_Deactivated({
     $window.Hide()
 })
 
+# Intercept Window Closing so Alt+F4 or system close hides the window without destroying it
+$script:IsExiting = $false
+$window.Add_Closing({
+    param($sender, $e)
+    if (-not $script:IsExiting) {
+        $e.Cancel = $true
+        $window.Hide()
+    }
+})
+
 # Keyboard accessibility: Close on Escape key (R-32)
 $window.Add_KeyDown({
     param($sender, $e)
@@ -258,12 +315,30 @@ $window.Add_KeyDown({
     }
 })
 
-# Close button
-$btnClose.Add_Click({ $window.Hide() })
+# Close button in header hides window
+$btnClose.Add_Click({
+    $window.Hide()
+})
 
 # Refresh button
 $btnRefresh.Add_Click({
     Update-DashboardUI
+})
+
+# Auto-start toggle handlers (UI checkbox and Tray context menu synchronized)
+if ($chkAutoStart) {
+    $chkAutoStart.Add_Click({
+        $targetState = [bool]$chkAutoStart.IsChecked
+        Set-AutoStart $targetState
+        $menuStartup.Checked = $targetState
+    })
+}
+
+$menuStartup.Add_Click({
+    $targetState = -not $menuStartup.Checked
+    Set-AutoStart $targetState
+    $menuStartup.Checked = $targetState
+    if ($chkAutoStart) { $chkAutoStart.IsChecked = $targetState }
 })
 
 # Context Menu Handlers
@@ -296,39 +371,41 @@ $int300.Add_Click({
     $dispatcherTimer.Interval = [TimeSpan]::FromSeconds(300)
 })
 
-# Menu Startup Toggle
-$startBatPath = Join-Path $projectDir "start.bat"
-$menuStartup.Add_Click({
-    $currentlyEnabled = $menuStartup.Checked
-    if ($currentlyEnabled) {
-        Remove-ItemProperty -Path $regPath -Name $regName -ErrorAction SilentlyContinue
-        $menuStartup.Checked = $false
-    } else {
-        $cmdToRun = "`"$startBatPath`""
-        Set-ItemProperty -Path $regPath -Name $regName -Value $cmdToRun
-        $menuStartup.Checked = $true
-    }
-})
-
-# Menu Exit
+# Clean, Exception-Free Exit Handler
 $menuExit.Add_Click({
-    $dispatcherTimer.Stop()
-    $wakeupTimer.Stop()
-    $notifyIcon.Visible = $false
-    $notifyIcon.Dispose()
-    if ($script:WakeupEvent) {
-        $script:WakeupEvent.Dispose()
-    }
-    if ($script:AppMutex) {
-        $script:AppMutex.ReleaseMutex()
-        $script:AppMutex.Dispose()
-    }
-    $window.Close()
-    if ($app) {
-        $app.Shutdown()
-    }
-    [System.Windows.Forms.Application]::Exit()
-    exit
+    $script:IsExiting = $true
+    try { $dispatcherTimer.Stop() } catch {}
+    try { $wakeupTimer.Stop() } catch {}
+    try {
+        if ($notifyIcon) {
+            $notifyIcon.Visible = $false
+            $notifyIcon.Dispose()
+        }
+    } catch {}
+    try {
+        if ($script:WakeupEvent) {
+            $script:WakeupEvent.Dispose()
+        }
+    } catch {}
+    try {
+        if ($script:AppMutex) {
+            try { $script:AppMutex.ReleaseMutex() } catch {}
+            $script:AppMutex.Dispose()
+        }
+    } catch {}
+    try {
+        Stop-HeadlessAntigravityDaemon
+    } catch {}
+    try {
+        $window.Close()
+    } catch {}
+    try {
+        if ($app) { $app.Shutdown() }
+    } catch {}
+    try {
+        [System.Windows.Forms.Application]::Exit()
+    } catch {}
+    [System.Environment]::Exit(0)
 })
 
 # 9. Periodic Quota Refresh Timer
@@ -337,7 +414,7 @@ $dispatcherTimer.Add_Tick({
 })
 $dispatcherTimer.Start()
 
-# 10. Wakeup Listener Timer (detects when user double-clicks shortcut or start.bat again)
+# 10. Wakeup Listener Timer (detects when user launches shortcut or start.bat again)
 $wakeupTimer = New-Object System.Windows.Threading.DispatcherTimer
 $wakeupTimer.Interval = [TimeSpan]::FromMilliseconds(500)
 $wakeupTimer.Add_Tick({

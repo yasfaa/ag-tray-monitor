@@ -25,7 +25,10 @@ A lightweight, native Windows desktop monitor that sits in your Taskbar System T
   - Auto-Refresh Interval (30 Seconds, 60 Seconds, 5 Minutes)
   - Open Web Hub
   - Start with Windows (Toggle autostart on system boot)
-  - Exit
+- **Auto-Headless Engine**:
+  - Automatically starts the lightweight background daemon (language_server.exe) silently if Antigravity IDE is closed.
+  - You never need to keep the heavy Antigravity IDE open while coding in Zed.
+  - Gracefully stops the headless process when you exit the monitor.
 - **Fast and Native**:
   - Built with native Windows .NET (WPF and WinForms) via PowerShell.
   - No Electron runtime, no external package installations.
@@ -81,7 +84,15 @@ When launched, the dashboard pops up immediately in the bottom-right corner to s
   - Select **Refresh Usage** to trigger an instant data sync.
   - Select **Auto-Refresh Interval** to switch between 30 seconds, 60 seconds, or 5 minutes.
   - Check **Start with Windows** to automatically launch the monitor when your PC boots.
-  - Select **Exit** to shut down the monitor.
+  - Select **Exit** to shut down the monitor cleanly.
+
+### Configuring Auto-Startup with Windows
+
+You can enable or disable automatic launch on Windows startup anytime:
+- **From the Dashboard**: Check or uncheck **Start with Windows** in the bottom-right corner of the dashboard footer.
+- **From the Tray Menu**: Right-click the tray icon and toggle **Start with Windows**.
+
+Both options stay synchronized and register the app in your Windows Startup folder and user registry for dependable background launch on boot.
 
 ### Using with Zed or Other Editors
 

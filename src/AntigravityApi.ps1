@@ -1,5 +1,5 @@
 # Antigravity Local API Client (PowerShell 5.1 & 7+ compatible)
-# Discovers running Antigravity Language Server and queries quota / user info
+# Discovers running Antigravity Language Server or automatically launches headless daemon
 
 Add-Type -AssemblyName System.Net.Http
 
@@ -8,6 +8,7 @@ Add-Type -AssemblyName System.Net.Http
 
 $script:CachedEndpoint = $null
 $script:CachedCsrf = $null
+$script:SpawnedDaemonProcess = $null
 
 function Format-RemainingTime($isoDate) {
     if (-not $isoDate) { return "Full" }
@@ -46,6 +47,91 @@ function Invoke-AntigravityRpc($baseUrl, $path, $csrf, $bodyObj) {
     return Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $bodyJson -TimeoutSec 3
 }
 
+function Find-LanguageServerBinary {
+    $candidates = @(
+        "$env:LOCALAPPDATA\Programs\antigravity\resources\bin\language_server.exe",
+        "$env:PROGRAMFILES\Antigravity\resources\bin\language_server.exe",
+        "${env:ProgramFiles(x86)}\Antigravity\resources\bin\language_server.exe",
+        "$env:LOCALAPPDATA\Programs\antigravity-ide\resources\bin\language_server.exe",
+        "$env:USERPROFILE\.gemini\antigravity\resources\bin\language_server.exe"
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c)) { return $c }
+    }
+    return $null
+}
+
+function Start-HeadlessAntigravityDaemon {
+    # If a previously spawned daemon is still running, reuse it
+    if ($script:SpawnedDaemonProcess -and (-not $script:SpawnedDaemonProcess.HasExited) -and $script:CachedEndpoint -and $script:CachedCsrf) {
+        try {
+            $test = Invoke-AntigravityRpc $script:CachedEndpoint "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary" $script:CachedCsrf $null
+            if ($test -and $test.response -and $test.response.groups) {
+                return @{
+                    BaseUrl = $script:CachedEndpoint
+                    Csrf = $script:CachedCsrf
+                    InitialQuota = $test
+                }
+            }
+        } catch {}
+    }
+
+    $bin = Find-LanguageServerBinary
+    if (-not $bin) { return $null }
+
+    $csrf = [System.Guid]::NewGuid().ToString()
+    $daemonArgs = @(
+        "--standalone",
+        "--override_ide_name", "antigravity",
+        "--subclient_type", "hub",
+        "--override_ide_version", "2.17.0",
+        "--override_user_agent_name", "antigravity",
+        "--https_server_port", "0",
+        "--csrf_token", $csrf,
+        "--app_data_dir", "antigravity",
+        "--api_server_url", "https://generativelanguage.googleapis.com",
+        "--cloud_code_endpoint", "https://daily-cloudcode-pa.googleapis.com"
+    )
+
+    try {
+        $proc = Start-Process -FilePath $bin -ArgumentList $daemonArgs -PassThru -WindowStyle Hidden
+        $script:SpawnedDaemonProcess = $proc
+        $script:CachedCsrf = $csrf
+
+        # Give process brief moment to initialize port
+        Start-Sleep -Milliseconds 1500
+
+        $ports = Get-NetTCPConnection -OwningProcess $proc.Id -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort
+        foreach ($port in ($ports | Select-Object -Unique)) {
+            foreach ($proto in @('https', 'http')) {
+                $baseUrl = "$proto`://127.0.0.1:$port"
+                try {
+                    $test = Invoke-AntigravityRpc $baseUrl "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary" $csrf $null
+                    if ($test -and $test.response -and $test.response.groups) {
+                        $script:CachedEndpoint = $baseUrl
+                        return @{
+                            BaseUrl = $baseUrl
+                            Csrf = $csrf
+                            InitialQuota = $test
+                        }
+                    }
+                } catch {}
+            }
+        }
+    } catch {}
+
+    return $null
+}
+
+function Stop-HeadlessAntigravityDaemon {
+    if ($script:SpawnedDaemonProcess -and (-not $script:SpawnedDaemonProcess.HasExited)) {
+        try {
+            Stop-Process -Id $script:SpawnedDaemonProcess.Id -Force -ErrorAction SilentlyContinue
+        } catch {}
+        $script:SpawnedDaemonProcess = $null
+    }
+}
+
 function Find-AntigravityConnection {
     # 1. Test cached connection first if present
     if ($script:CachedEndpoint -and $script:CachedCsrf) {
@@ -66,73 +152,80 @@ function Find-AntigravityConnection {
 
     # 2. Query Windows processes for Antigravity language_server or hub-port
     $procs = Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%language_server%' OR CommandLine LIKE '%--hub-port%'" -ErrorAction SilentlyContinue
-    if (-not $procs) { return $null }
 
-    # Sort candidates prioritizing standalone Antigravity
-    $sortedProcs = $procs | Sort-Object -Property @{
-        Expression = {
-            $cmd = ""
-            if ($_.CommandLine) { $cmd = $_.CommandLine.ToLower() }
-            $score = 0
-            if ($cmd -like "*--standalone*") { $score += 10 }
-            if ($cmd -like "*antigravity\resources\bin\language_server.exe*") { $score += 8 }
-            if ($cmd -like "*--csrf_token*") { $score += 5 }
-            if ($cmd -like "*--hub-port*") { $score += 4 }
-            $score
-        }
-    } -Descending
+    if ($procs) {
+        # Sort candidates prioritizing standalone Antigravity
+        $sortedProcs = $procs | Sort-Object -Property @{
+            Expression = {
+                $cmd = ""
+                if ($_.CommandLine) { $cmd = $_.CommandLine.ToLower() }
+                $score = 0
+                if ($cmd -like "*--standalone*") { $score += 10 }
+                if ($cmd -like "*antigravity\resources\bin\language_server.exe*") { $score += 8 }
+                if ($cmd -like "*--csrf_token*") { $score += 5 }
+                if ($cmd -like "*--hub-port*") { $score += 4 }
+                $score
+            }
+        } -Descending
 
-    foreach ($p in $sortedProcs) {
-        $cmd = $p.CommandLine
-        if (-not $cmd) { continue }
+        foreach ($p in $sortedProcs) {
+            $cmd = $p.CommandLine
+            if (-not $cmd) { continue }
 
-        $csrf = $null
-        if ($cmd -match '--csrf_token[=\s]+"([^"]+)"' -or $cmd -match "--csrf_token[=\s]+'([^']+)'" -or $cmd -match '--csrf_token[=\s]+([^\s"'']+)') {
-            $csrf = $matches[1].Trim()
-        }
+            $csrf = $null
+            if ($cmd -match '--csrf_token[=\s]+"([^"]+)"' -or $cmd -match "--csrf_token[=\s]+'([^']+)'" -or $cmd -match '--csrf_token[=\s]+([^\s"'']+)') {
+                $csrf = $matches[1].Trim()
+            }
 
-        $hubPort = $null
-        if ($cmd -match '--hub-port(?:=|\s+)(?:"(\d{1,5})"|''(\d{1,5})''|(\d{1,5}))') {
-            $val = ($matches[1], $matches[2], $matches[3] | Where-Object { $_ })[0]
-            $hubPort = [int]$val
-        }
+            $hubPort = $null
+            if ($cmd -match '--hub-port(?:=|\s+)(?:"(\d{1,5})"|''(\d{1,5})''|(\d{1,5}))') {
+                $val = ($matches[1], $matches[2], $matches[3] | Where-Object { $_ })[0]
+                $hubPort = [int]$val
+            }
 
-        $ports = @()
-        if ($csrf) {
-            $ports = Get-NetTCPConnection -OwningProcess $p.ProcessId -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort
-        } elseif ($hubPort) {
-            try {
-                $hubHtml = (Invoke-WebRequest -Uri "http://127.0.0.1:$hubPort/" -UseBasicParsing -TimeoutSec 2).Content
-                if ($hubHtml -match '__APP_CONFIG__\s*=\s*(\{.*?\})\s*;') {
-                    $json = $matches[1] | ConvertFrom-Json
-                    if ($json.csrfToken) {
-                        $csrf = $json.csrfToken
-                        $ports = @($hubPort)
-                    }
-                }
-            } catch {}
-        }
-
-        if ($csrf -and $ports.Count -gt 0) {
-            $uniquePorts = $ports | Select-Object -Unique
-            foreach ($port in $uniquePorts) {
-                foreach ($proto in @('https', 'http')) {
-                    $baseUrl = "$proto`://127.0.0.1:$port"
-                    try {
-                        $test = Invoke-AntigravityRpc $baseUrl "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary" $csrf $null
-                        if ($test -and $test.response -and $test.response.groups) {
-                            $script:CachedEndpoint = $baseUrl
-                            $script:CachedCsrf = $csrf
-                            return @{
-                                BaseUrl = $baseUrl
-                                Csrf = $csrf
-                                InitialQuota = $test
-                            }
+            $ports = @()
+            if ($csrf) {
+                $ports = Get-NetTCPConnection -OwningProcess $p.ProcessId -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort
+            } elseif ($hubPort) {
+                try {
+                    $hubHtml = (Invoke-WebRequest -Uri "http://127.0.0.1:$hubPort/" -UseBasicParsing -TimeoutSec 2).Content
+                    if ($hubHtml -match '__APP_CONFIG__\s*=\s*(\{.*?\})\s*;') {
+                        $json = $matches[1] | ConvertFrom-Json
+                        if ($json.csrfToken) {
+                            $csrf = $json.csrfToken
+                            $ports = @($hubPort)
                         }
-                    } catch {}
+                    }
+                } catch {}
+            }
+
+            if ($csrf -and $ports.Count -gt 0) {
+                $uniquePorts = $ports | Select-Object -Unique
+                foreach ($port in $uniquePorts) {
+                    foreach ($proto in @('https', 'http')) {
+                        $baseUrl = "$proto`://127.0.0.1:$port"
+                        try {
+                            $test = Invoke-AntigravityRpc $baseUrl "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary" $csrf $null
+                            if ($test -and $test.response -and $test.response.groups) {
+                                $script:CachedEndpoint = $baseUrl
+                                $script:CachedCsrf = $csrf
+                                return @{
+                                    BaseUrl = $baseUrl
+                                    Csrf = $csrf
+                                    InitialQuota = $test
+                                }
+                            }
+                        } catch {}
+                    }
                 }
             }
         }
+    }
+
+    # 3. If no active process found, auto-spawn headless background daemon
+    $headless = Start-HeadlessAntigravityDaemon
+    if ($headless) {
+        return $headless
     }
 
     return $null
@@ -143,7 +236,7 @@ function Get-AntigravityUsageData {
     if (-not $conn) {
         return @{
             IsConnected = $false
-            Error = "Antigravity process not found. Ensure Antigravity IDE or CLI is open."
+            Error = "Antigravity language_server not found. Ensure Antigravity is installed."
             LastUpdated = [DateTime]::Now
         }
     }
