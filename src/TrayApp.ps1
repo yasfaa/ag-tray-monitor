@@ -65,8 +65,6 @@ $dotStatus     = $window.FindName("dotStatus")
 $txtStatus     = $window.FindName("txtStatus")
 $btnRefresh    = $window.FindName("btnRefresh")
 $btnClose      = $window.FindName("btnClose")
-$btnHide       = $window.FindName("btnHide")
-$btnHub        = $window.FindName("btnHub")
 $txtUserName   = $window.FindName("txtUserName")
 $txtUserEmail  = $window.FindName("txtUserEmail")
 $txtPlanBadge  = $window.FindName("txtPlanBadge")
@@ -260,18 +258,12 @@ $window.Add_KeyDown({
     }
 })
 
-# Close buttons
+# Close button
 $btnClose.Add_Click({ $window.Hide() })
-$btnHide.Add_Click({ $window.Hide() })
 
 # Refresh button
 $btnRefresh.Add_Click({
     Update-DashboardUI
-})
-
-# Web Hub button
-$btnHub.Add_Click({
-    [System.Diagnostics.Process]::Start($script:CurrentHubUrl) | Out-Null
 })
 
 # Context Menu Handlers
