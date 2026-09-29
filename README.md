@@ -50,7 +50,7 @@ A lightweight, native Windows desktop monitor that sits in your Taskbar System T
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/<your-username>/ag-tray-monitor.git
+git clone https://github.com/yasfaa/ag-tray-monitor.git
 cd ag-tray-monitor
 ```
 
