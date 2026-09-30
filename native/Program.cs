@@ -1191,16 +1191,47 @@ namespace AGQuotaTracker
 
         public static bool IsEnabled()
         {
-            bool inFolder = File.Exists(ShortcutPath);
-            bool inReg = false;
-            using (var key = Registry.CurrentUser.OpenSubKey(RegRunKey, false))
+            string exePath = Process.GetCurrentProcess().MainModule.FileName;
+
+            // Check Startup shortcut
+            if (File.Exists(ShortcutPath))
             {
-                if (key != null)
+                try
                 {
-                    inReg = key.GetValue(RegAppName) != null;
+                    Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                    dynamic shell = Activator.CreateInstance(shellType);
+                    dynamic shortcut = shell.CreateShortcut(ShortcutPath);
+                    string target = shortcut.TargetPath;
+                    if (string.Equals(target, exePath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+                catch { }
+            }
+
+            // Check Registry Run
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(RegRunKey, false))
+                {
+                    if (key != null)
+                    {
+                        var val = key.GetValue(RegAppName) as string;
+                        if (!string.IsNullOrEmpty(val))
+                        {
+                            string cleaned = val.Trim('\"');
+                            if (string.Equals(cleaned, exePath, StringComparison.OrdinalIgnoreCase))
+                            {
+                                return true;
+                            }
+                        }
+                    }
                 }
             }
-            return inFolder || inReg;
+            catch { }
+
+            return false;
         }
 
         public static void SetEnabled(bool enable)
@@ -1451,6 +1482,25 @@ namespace AGQuotaTracker
             PositionFlyout();
             Activate();
             Focus();
+        }
+
+        private System.Drawing.Icon GetEmbeddedAppIcon()
+        {
+            try
+            {
+                string exeDir = AppDomain.CurrentDomain.BaseDirectory;
+                string icoPath = Path.Combine(exeDir, @"assets\icon.ico");
+                if (File.Exists(icoPath))
+                {
+                    return new System.Drawing.Icon(icoPath);
+                }
+
+                string exePath = Process.GetCurrentProcess().MainModule.FileName;
+                var extracted = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
+                if (extracted != null) return extracted;
+            }
+            catch { }
+            return SystemIcons.Application;
         }
 
         private SolidColorBrush Brush(string hex)
@@ -1791,6 +1841,24 @@ namespace AGQuotaTracker
                 var bi = new System.Windows.Media.Imaging.BitmapImage(new Uri(pngPath));
                 _imgAppIcon.Source = bi;
             }
+            else
+            {
+                try
+                {
+                    using (var appIcon = GetEmbeddedAppIcon())
+                    {
+                        if (appIcon != null)
+                        {
+                            var imgSource = System.Windows.Interop.Imaging.CreateBitmapSourceFromHIcon(
+                                appIcon.Handle,
+                                Int32Rect.Empty,
+                                System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+                            _imgAppIcon.Source = imgSource;
+                        }
+                    }
+                }
+                catch { }
+            }
             Grid.SetColumn(_imgAppIcon, 0);
             headerGrid.Children.Add(_imgAppIcon);
 
@@ -2026,18 +2094,8 @@ namespace AGQuotaTracker
 
         private void SetupTray()
         {
-            string exeDir = AppDomain.CurrentDomain.BaseDirectory;
-            string icoPath = Path.Combine(exeDir, @"assets\icon.ico");
-
             _notifyIcon = new NotifyIcon();
-            if (File.Exists(icoPath))
-            {
-                _notifyIcon.Icon = new Icon(icoPath);
-            }
-            else
-            {
-                _notifyIcon.Icon = SystemIcons.Application;
-            }
+            _notifyIcon.Icon = GetEmbeddedAppIcon();
             _notifyIcon.Text = "Antigravity Quota Monitor";
             _notifyIcon.Visible = true;
 
