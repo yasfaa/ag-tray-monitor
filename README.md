@@ -6,12 +6,16 @@ Works in two ways:
 - **Local Mode**: connects directly to your active Antigravity IDE language server session.
 - **Cloud Mode**: connects to the Google Cloud Code API with your Google account, tracking your quotas even when your IDE is closed.
 
+<p align="center">
+  <img src="assets/preview.png" alt="Antigravity Quota Monitor Dashboard" width="380" />
+</p>
+
 ---
 
 ## What It Does
 
 ### System Tray Presence
-- Sits quietly in the Windows notification area with a high-contrast rocket icon.
+- Sits in the Windows notification area featuring the official Antigravity logo surrounded by a real-time circular progress gauge that dynamically tracks your Gemini 5-hour quota percentage (color-coded: Emerald Green > 50%, Amber 20-50%, Red < 20%).
 - Hovering over the icon shows a tooltip with your active source (Local or Cloud) and current quota percentages.
 - Right-clicking opens the control menu for quick refreshes, account switching, interval settings, and startup toggles.
 
@@ -105,6 +109,7 @@ ag-tray-monitor/
 ├── native/
 │   └── Program.cs             # Native C# WPF source code
 └── assets/
-    ├── icon.ico               # Windows system tray and application icon
-    └── icon.png               # High-resolution application logo
+    ├── icon.ico               # Windows application icon (pure white glyph)
+    ├── icon.png               # High-resolution application logo (pure white glyph)
+    └── preview.png            # Application preview screenshot
 ```

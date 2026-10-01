@@ -3,6 +3,7 @@ Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 *.exe
+*.lnk
 
 # Logs and temporary files
 *.log

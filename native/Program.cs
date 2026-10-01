@@ -631,10 +631,6 @@ namespace AGQuotaTracker
         private static string _cachedCsrf;
         private static Process _spawnedDaemon;
 
-        public static string CachedEndpoint
-        {
-            get { return _cachedEndpoint; }
-        }
 
         static ApiClient()
         {
@@ -659,6 +655,36 @@ namespace AGQuotaTracker
             catch
             {
                 return isoDate;
+            }
+        }
+
+        public static string FormatLocalResetClock(string isoDate)
+        {
+            if (string.IsNullOrEmpty(isoDate)) return "";
+            try
+            {
+                DateTime targetUtc;
+                if (!DateTime.TryParse(isoDate, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out targetUtc))
+                {
+                    targetUtc = DateTime.Parse(isoDate);
+                }
+                targetUtc = targetUtc.ToUniversalTime();
+                DateTime targetLocal = targetUtc.ToLocalTime();
+                DateTime nowLocal = DateTime.Now;
+                TimeSpan diff = targetLocal - nowLocal;
+                if (diff.TotalSeconds <= 0) return "";
+
+                if (targetLocal.Date == nowLocal.Date)
+                    return "at " + targetLocal.ToString("HH:mm");
+                if (targetLocal.Date == nowLocal.Date.AddDays(1))
+                    return "Tomorrow, " + targetLocal.ToString("HH:mm");
+                if (diff.TotalDays < 6)
+                    return targetLocal.ToString("ddd, HH:mm");
+                return targetLocal.ToString("d MMM, HH:mm");
+            }
+            catch
+            {
+                return "";
             }
         }
 
@@ -1290,40 +1316,16 @@ namespace AGQuotaTracker
 
     public class Program
     {
-        private static void SafeLog(string msg)
-        {
-            try
-            {
-                string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "startup_debug.log");
-                File.AppendAllText(logPath, msg);
-            }
-            catch { }
-        }
-
         [STAThread]
         public static void Main(string[] args)
         {
-            AppDomain.CurrentDomain.ProcessExit += delegate
-            {
-                SafeLog("PROCESS EXIT TRIGGERED AT " + DateTime.Now.ToString("HH:mm:ss.fff") + "\r\nSTACK:\r\n" + Environment.StackTrace + "\r\n");
-            };
-            AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e)
-            {
-                SafeLog("UNHANDLED EXCEPTION: " + (e.ExceptionObject != null ? e.ExceptionObject.ToString() : "null") + "\r\n");
-            };
-
             try
             {
-                var curProc = Process.GetCurrentProcess();
-                SafeLog(string.Format("Main started PID={0} Name={1} at {2}\r\n", curProc.Id, curProc.ProcessName, DateTime.Now.ToString("HH:mm:ss.fff")));
-
                 bool createdNew;
                 using (var mutex = new Mutex(true, "Local\\AntigravityQuotaMonitor_SingleInstanceMutex", out createdNew))
                 {
-                    SafeLog("Mutex createdNew: " + createdNew + "\r\n");
                     if (!createdNew)
                     {
-                        SafeLog("Signaling existing instance...\r\n");
                         try
                         {
                             var ev = EventWaitHandle.OpenExisting("Local\\AntigravityQuotaMonitor_WakeupEvent");
@@ -1335,42 +1337,31 @@ namespace AGQuotaTracker
 
                     using (var wakeupEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\AntigravityQuotaMonitor_WakeupEvent"))
                     {
-                        SafeLog("Step 1: Creating Application...\r\n");
                         var app = new Application();
                         app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
-                        app.DispatcherUnhandledException += delegate(object s, DispatcherUnhandledExceptionEventArgs e)
-                        {
-                            SafeLog("DISPATCHER EXCEPTION: " + e.Exception.ToString() + "\r\n");
-                            e.Handled = true;
-                        };
-
-                        SafeLog("Step 2: Creating DashboardWindow...\r\n");
                         var window = new DashboardWindow(wakeupEvent);
-
-                        SafeLog("Step 3: window.Show()...\r\n");
                         window.Show();
-
-                        SafeLog("Step 4: window.Activate()...\r\n");
                         window.Activate();
-
-                        SafeLog("Step 5: Starting Application.Run()...\r\n");
                         app.Run();
-                        SafeLog("Application.Run() ended.\r\n");
                     }
                 }
             }
-            catch (Exception ex)
-            {
-                SafeLog("MAIN EXCEPTION: " + ex.ToString() + "\r\n");
-            }
+            catch { }
         }
     }
 
     public class DashboardWindow : Window
     {
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern bool DestroyIcon(IntPtr handle);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr hObject);
+
         private readonly EventWaitHandle _wakeupEvent;
         private NotifyIcon _notifyIcon;
-        private ContextMenuStrip _contextMenu;
+        private System.Drawing.Icon _currentDynamicIcon = null;
+        private System.Drawing.Bitmap _baseLogoBitmap = null;
         private ToolStripMenuItem _menuAccountsSub;
         private ToolStripMenuItem _menuStartup;
         private DispatcherTimer _refreshTimer;
@@ -1379,12 +1370,9 @@ namespace AGQuotaTracker
         private System.Windows.Controls.Image _imgAppIcon;
         private Ellipse _dotStatus;
         private TextBlock _txtStatus;
-        private Button _btnRefresh;
-        private Button _btnClose;
 
         private TextBlock _txtUserName;
         private Button _btnAccountSelect;
-        private TextBlock _txtAccountIcon;
         private TextBlock _txtUserEmail;
         private Border _badgeSource;
         private TextBlock _txtSourceBadge;
@@ -1394,16 +1382,20 @@ namespace AGQuotaTracker
         private TextBlock _txtGemini5hPct;
         private Border _barGemini5h;
         private TextBlock _txtGemini5hReset;
+        private TextBlock _txtGemini5hTime;
         private TextBlock _txtGeminiWkPct;
         private Border _barGeminiWk;
         private TextBlock _txtGeminiWkReset;
+        private TextBlock _txtGeminiWkTime;
 
         private TextBlock _txtClaude5hPct;
         private Border _barClaude5h;
         private TextBlock _txtClaude5hReset;
+        private TextBlock _txtClaude5hTime;
         private TextBlock _txtClaudeWkPct;
         private Border _barClaudeWk;
         private TextBlock _txtClaudeWkReset;
+        private TextBlock _txtClaudeWkTime;
 
         private TextBlock _txtLastUpdated;
         private CheckBox _chkAutoStart;
@@ -1503,6 +1495,118 @@ namespace AGQuotaTracker
             return SystemIcons.Application;
         }
 
+        private void LoadBaseLogo()
+        {
+            try
+            {
+                string exeDir = AppDomain.CurrentDomain.BaseDirectory;
+                string pngPath = Path.Combine(exeDir, @"assets\icon.png");
+                if (File.Exists(pngPath))
+                {
+                    _baseLogoBitmap = new System.Drawing.Bitmap(pngPath);
+                    return;
+                }
+
+                using (var appIcon = GetEmbeddedAppIcon())
+                {
+                    if (appIcon != null) _baseLogoBitmap = appIcon.ToBitmap();
+                }
+            }
+            catch { }
+        }
+
+        private System.Drawing.Bitmap CreateGaugeBitmap(int size, double pct, double remaining, bool isConnected)
+        {
+            if (_baseLogoBitmap == null) LoadBaseLogo();
+            var bmp = new System.Drawing.Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (var g = System.Drawing.Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                g.Clear(System.Drawing.Color.Transparent);
+
+                float stroke = Math.Max(2.5f, size * 0.10f);
+                float pad = stroke / 2f + Math.Max(1f, size * 0.02f);
+                float arcSize = size - (pad * 2f);
+                var arcRect = new System.Drawing.RectangleF(pad, pad, arcSize, arcSize);
+
+                using (var trackPen = new System.Drawing.Pen(System.Drawing.Color.FromArgb(160, 71, 85, 105), stroke))
+                {
+                    g.DrawEllipse(trackPen, arcRect);
+                }
+
+                if (isConnected && pct > 0.01)
+                {
+                    var arcColor = remaining > 0.5 ? System.Drawing.Color.FromArgb(16, 185, 129)
+                        : (remaining > 0.2 ? System.Drawing.Color.FromArgb(245, 158, 11) : System.Drawing.Color.FromArgb(239, 68, 68));
+                    float sweep = (float)Math.Min(360.0, Math.Max(1.0, pct * 3.6));
+                    using (var arcPen = new System.Drawing.Pen(arcColor, stroke))
+                    {
+                        arcPen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                        arcPen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                        if (sweep >= 359.5f) g.DrawEllipse(arcPen, arcRect);
+                        else g.DrawArc(arcPen, arcRect, -90f, sweep);
+                    }
+                }
+
+                if (_baseLogoBitmap != null)
+                {
+                    float rocketPad = stroke + Math.Max(1f, size * 0.05f);
+                    float rocketSize = size - (rocketPad * 2f);
+                    float rx = (size - rocketSize) / 2f;
+                    g.DrawImage(_baseLogoBitmap, new System.Drawing.RectangleF(rx, rx, rocketSize, rocketSize));
+                }
+            }
+            return bmp;
+        }
+
+        private void UpdateTrayGauge(double pct, double remaining, bool isConnected)
+        {
+            try
+            {
+                if (_notifyIcon == null) return;
+                int size = Math.Max(32, SystemInformation.SmallIconSize.Width);
+                using (var bmp = CreateGaugeBitmap(size, pct, remaining, isConnected))
+                {
+                    IntPtr hIcon = bmp.GetHicon();
+                    try
+                    {
+                        using (var tempIcon = System.Drawing.Icon.FromHandle(hIcon))
+                        {
+                            var oldIcon = _currentDynamicIcon;
+                            _currentDynamicIcon = (System.Drawing.Icon)tempIcon.Clone();
+                            _notifyIcon.Icon = _currentDynamicIcon;
+                            if (oldIcon != null) oldIcon.Dispose();
+                        }
+                    }
+                    finally { DestroyIcon(hIcon); }
+                }
+            }
+            catch { }
+        }
+
+        private void UpdateAppHeaderGauge(double pct, double remaining, bool isConnected)
+        {
+            try
+            {
+                if (_imgAppIcon == null) return;
+                using (var bmp = CreateGaugeBitmap(64, pct, remaining, isConnected))
+                {
+                    IntPtr hBitmap = bmp.GetHbitmap();
+                    try
+                    {
+                        var bs = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                            hBitmap, IntPtr.Zero, Int32Rect.Empty, System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+                        bs.Freeze();
+                        _imgAppIcon.Source = bs;
+                    }
+                    finally { DeleteObject(hBitmap); }
+                }
+            }
+            catch { }
+        }
+
         private SolidColorBrush Brush(string hex)
         {
             return (SolidColorBrush)new BrushConverter().ConvertFromString(hex);
@@ -1515,17 +1619,17 @@ namespace AGQuotaTracker
             return Brush("#EF4444");                // red
         }
 
-        private Style CreateHeaderButtonStyle()
+        private Style CreateCustomButtonStyle(string bg, Thickness pad, HorizontalAlignment align, string hoverBg, string hoverFg = null, string hoverBorder = null)
         {
             var style = new Style(typeof(Button));
-            style.Setters.Add(new Setter(Button.BackgroundProperty, Brush("#1E293B")));
+            style.Setters.Add(new Setter(Button.BackgroundProperty, Brush(bg)));
             style.Setters.Add(new Setter(Button.BorderBrushProperty, Brush("#334155")));
             style.Setters.Add(new Setter(Button.BorderThicknessProperty, new Thickness(1)));
             style.Setters.Add(new Setter(Button.ForegroundProperty, Brush("#94A3B8")));
             style.Setters.Add(new Setter(Button.FontSizeProperty, 11.0));
             style.Setters.Add(new Setter(Button.FontWeightProperty, FontWeights.Medium));
             style.Setters.Add(new Setter(Button.CursorProperty, System.Windows.Input.Cursors.Hand));
-            style.Setters.Add(new Setter(Button.PaddingProperty, new Thickness(10, 4, 10, 4)));
+            style.Setters.Add(new Setter(Button.PaddingProperty, pad));
 
             var template = new ControlTemplate(typeof(Button));
             var borderFactory = new FrameworkElementFactory(typeof(Border), "border");
@@ -1535,53 +1639,16 @@ namespace AGQuotaTracker
             borderFactory.SetBinding(Border.BorderThicknessProperty, new System.Windows.Data.Binding("BorderThickness") { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent) });
 
             var contentFactory = new FrameworkElementFactory(typeof(ContentPresenter));
-            contentFactory.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            contentFactory.SetValue(ContentPresenter.HorizontalAlignmentProperty, align);
             contentFactory.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
             contentFactory.SetBinding(ContentPresenter.MarginProperty, new System.Windows.Data.Binding("Padding") { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent) });
             borderFactory.AppendChild(contentFactory);
-
             template.VisualTree = borderFactory;
 
-            var hoverTrigger = new Trigger();
-            hoverTrigger.Property = Button.IsMouseOverProperty;
-            hoverTrigger.Value = true;
-            hoverTrigger.Setters.Add(new Setter(Border.BackgroundProperty, Brush("#334155"), "border"));
-            hoverTrigger.Setters.Add(new Setter(Button.ForegroundProperty, Brush("#F8FAFC")));
-            template.Triggers.Add(hoverTrigger);
-
-            style.Setters.Add(new Setter(Button.TemplateProperty, template));
-            return style;
-        }
-
-        private Style CreateAccountButtonStyle()
-        {
-            var style = new Style(typeof(Button));
-            style.Setters.Add(new Setter(Button.BackgroundProperty, Brush("#131C2E")));
-            style.Setters.Add(new Setter(Button.BorderBrushProperty, Brush("#334155")));
-            style.Setters.Add(new Setter(Button.BorderThicknessProperty, new Thickness(1)));
-            style.Setters.Add(new Setter(Button.CursorProperty, System.Windows.Input.Cursors.Hand));
-            style.Setters.Add(new Setter(Button.PaddingProperty, new Thickness(10, 6, 10, 6)));
-
-            var template = new ControlTemplate(typeof(Button));
-            var borderFactory = new FrameworkElementFactory(typeof(Border), "border");
-            borderFactory.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
-            borderFactory.SetBinding(Border.BackgroundProperty, new System.Windows.Data.Binding("Background") { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent) });
-            borderFactory.SetBinding(Border.BorderBrushProperty, new System.Windows.Data.Binding("BorderBrush") { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent) });
-            borderFactory.SetBinding(Border.BorderThicknessProperty, new System.Windows.Data.Binding("BorderThickness") { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent) });
-
-            var contentFactory = new FrameworkElementFactory(typeof(ContentPresenter));
-            contentFactory.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
-            contentFactory.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-            contentFactory.SetBinding(ContentPresenter.MarginProperty, new System.Windows.Data.Binding("Padding") { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent) });
-            borderFactory.AppendChild(contentFactory);
-
-            template.VisualTree = borderFactory;
-
-            var hoverTrigger = new Trigger();
-            hoverTrigger.Property = Button.IsMouseOverProperty;
-            hoverTrigger.Value = true;
-            hoverTrigger.Setters.Add(new Setter(Border.BackgroundProperty, Brush("#1E293B"), "border"));
-            hoverTrigger.Setters.Add(new Setter(Border.BorderBrushProperty, Brush("#475569"), "border"));
+            var hoverTrigger = new Trigger { Property = Button.IsMouseOverProperty, Value = true };
+            hoverTrigger.Setters.Add(new Setter(Border.BackgroundProperty, Brush(hoverBg), "border"));
+            if (hoverFg != null) hoverTrigger.Setters.Add(new Setter(Button.ForegroundProperty, Brush(hoverFg)));
+            if (hoverBorder != null) hoverTrigger.Setters.Add(new Setter(Border.BorderBrushProperty, Brush(hoverBorder), "border"));
             template.Triggers.Add(hoverTrigger);
 
             style.Setters.Add(new Setter(Button.TemplateProperty, template));
@@ -1670,120 +1737,59 @@ namespace AGQuotaTracker
             return style;
         }
 
-        private Border CreateQuotaCard(string title, string models,
-            out TextBlock pct5h, out Border bar5h, out TextBlock reset5h,
-            out TextBlock pctWk, out Border barWk, out TextBlock resetWk)
+        private void AddQuotaSection(StackPanel parent, string label, bool hasBottomMargin,
+            out TextBlock pct, out Border bar, out TextBlock reset, out TextBlock time)
         {
-            var card = new Border();
-            card.Background = Brush("#1E293B");
-            card.CornerRadius = new CornerRadius(8);
-            card.BorderBrush = Brush("#334155");
-            card.BorderThickness = new Thickness(1);
-            card.Padding = new Thickness(14, 12, 14, 12);
-            card.Margin = new Thickness(0, 0, 0, 10);
+            var g = new Grid { Margin = new Thickness(0, 0, 0, 4) };
+            g.Children.Add(new TextBlock { Text = label, Foreground = Brush("#CBD5E1"), FontSize = 11 });
+            pct = new TextBlock { Text = "100%", Foreground = Brush("#10B981"), FontSize = 11.5, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Right };
+            g.Children.Add(pct);
+            parent.Children.Add(g);
+
+            bar = new Border { HorizontalAlignment = HorizontalAlignment.Left, Background = Brush("#10B981"), CornerRadius = new CornerRadius(3), Width = 0, MaxWidth = TrackWidth };
+            var track = new Border { Height = 6, Background = Brush("#090D16"), CornerRadius = new CornerRadius(3), Width = TrackWidth, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 4), Child = bar };
+            parent.Children.Add(track);
+
+            var resetGrid = new Grid { Margin = new Thickness(0, 0, 0, hasBottomMargin ? 8 : 0) };
+            resetGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            resetGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            reset = new TextBlock { Text = "Resets in ...", Foreground = Brush("#64748B"), FontSize = 10.5, TextTrimming = TextTrimming.CharacterEllipsis };
+            Grid.SetColumn(reset, 0);
+            resetGrid.Children.Add(reset);
+
+            time = new TextBlock { Text = "", Foreground = Brush("#94A3B8"), FontSize = 10.5, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(6, 0, 0, 0) };
+            Grid.SetColumn(time, 1);
+            resetGrid.Children.Add(time);
+
+            parent.Children.Add(resetGrid);
+        }
+
+        private Border CreateQuotaCard(string title, string models,
+            out TextBlock pct5h, out Border bar5h, out TextBlock reset5h, out TextBlock time5h,
+            out TextBlock pctWk, out Border barWk, out TextBlock resetWk, out TextBlock timeWk)
+        {
+            var card = new Border
+            {
+                Background = Brush("#1E293B"),
+                CornerRadius = new CornerRadius(8),
+                BorderBrush = Brush("#334155"),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(14, 12, 14, 12),
+                Margin = new Thickness(0, 0, 0, 10)
+            };
 
             var sp = new StackPanel();
-
-            var headerGrid = new Grid();
-            headerGrid.Margin = new Thickness(0, 0, 0, 8);
-
-            var tbTitle = new TextBlock();
-            tbTitle.Text = title;
-            tbTitle.Foreground = Brush("#F8FAFC");
-            tbTitle.FontSize = 12.5;
-            tbTitle.FontWeight = FontWeights.SemiBold;
+            var headerGrid = new Grid { Margin = new Thickness(0, 0, 0, 8) };
+            var tbTitle = new TextBlock { Text = title, Foreground = Brush("#F8FAFC"), FontSize = 12.5, FontWeight = FontWeights.SemiBold };
             headerGrid.Children.Add(tbTitle);
 
-            var txtModels = new TextBlock();
-            txtModels.Text = models;
-            txtModels.Foreground = Brush("#64748B");
-            txtModels.FontSize = 11;
-            txtModels.HorizontalAlignment = HorizontalAlignment.Right;
+            var txtModels = new TextBlock { Text = models, Foreground = Brush("#64748B"), FontSize = 11, HorizontalAlignment = HorizontalAlignment.Right };
             headerGrid.Children.Add(txtModels);
             sp.Children.Add(headerGrid);
 
-            // 5-Hour Limit
-            var g5h = new Grid();
-            g5h.Margin = new Thickness(0, 0, 0, 4);
-            var tb5h = new TextBlock();
-            tb5h.Text = "5-Hour Limit";
-            tb5h.Foreground = Brush("#CBD5E1");
-            tb5h.FontSize = 11;
-            g5h.Children.Add(tb5h);
-
-            pct5h = new TextBlock();
-            pct5h.Text = "100%";
-            pct5h.Foreground = Brush("#10B981");
-            pct5h.FontSize = 11.5;
-            pct5h.FontWeight = FontWeights.Bold;
-            pct5h.HorizontalAlignment = HorizontalAlignment.Right;
-            g5h.Children.Add(pct5h);
-            sp.Children.Add(g5h);
-
-            var track5h = new Border();
-            track5h.Height = 6;
-            track5h.Background = Brush("#090D16");
-            track5h.CornerRadius = new CornerRadius(3);
-            track5h.Width = TrackWidth;
-            track5h.HorizontalAlignment = HorizontalAlignment.Left;
-            track5h.Margin = new Thickness(0, 0, 0, 4);
-
-            bar5h = new Border();
-            bar5h.HorizontalAlignment = HorizontalAlignment.Left;
-            bar5h.Background = Brush("#10B981");
-            bar5h.CornerRadius = new CornerRadius(3);
-            bar5h.Width = 0;
-            bar5h.MaxWidth = TrackWidth;
-            track5h.Child = bar5h;
-            sp.Children.Add(track5h);
-
-            reset5h = new TextBlock();
-            reset5h.Text = "Resets in ...";
-            reset5h.Foreground = Brush("#64748B");
-            reset5h.FontSize = 10.5;
-            reset5h.Margin = new Thickness(0, 0, 0, 8);
-            sp.Children.Add(reset5h);
-
-            // Weekly Limit
-            var gWk = new Grid();
-            gWk.Margin = new Thickness(0, 0, 0, 4);
-            var tbWk = new TextBlock();
-            tbWk.Text = "Weekly Limit";
-            tbWk.Foreground = Brush("#CBD5E1");
-            tbWk.FontSize = 11;
-            gWk.Children.Add(tbWk);
-
-            pctWk = new TextBlock();
-            pctWk.Text = "100%";
-            pctWk.Foreground = Brush("#10B981");
-            pctWk.FontSize = 11.5;
-            pctWk.FontWeight = FontWeights.Bold;
-            pctWk.HorizontalAlignment = HorizontalAlignment.Right;
-            gWk.Children.Add(pctWk);
-            sp.Children.Add(gWk);
-
-            var trackWk = new Border();
-            trackWk.Height = 6;
-            trackWk.Background = Brush("#090D16");
-            trackWk.CornerRadius = new CornerRadius(3);
-            trackWk.Width = TrackWidth;
-            trackWk.HorizontalAlignment = HorizontalAlignment.Left;
-            trackWk.Margin = new Thickness(0, 0, 0, 4);
-
-            barWk = new Border();
-            barWk.HorizontalAlignment = HorizontalAlignment.Left;
-            barWk.Background = Brush("#10B981");
-            barWk.CornerRadius = new CornerRadius(3);
-            barWk.Width = 0;
-            barWk.MaxWidth = TrackWidth;
-            trackWk.Child = barWk;
-            sp.Children.Add(trackWk);
-
-            resetWk = new TextBlock();
-            resetWk.Text = "Resets in ...";
-            resetWk.Foreground = Brush("#64748B");
-            resetWk.FontSize = 10.5;
-            sp.Children.Add(resetWk);
+            AddQuotaSection(sp, "5-Hour Limit", true, out pct5h, out bar5h, out reset5h, out time5h);
+            AddQuotaSection(sp, "Weekly Limit", false, out pctWk, out barWk, out resetWk, out timeWk);
 
             card.Child = sp;
             return card;
@@ -1819,7 +1825,7 @@ namespace AGQuotaTracker
             var mainStack = new StackPanel();
             mainStack.Margin = new Thickness(16, 14, 16, 14);
 
-            var headerBtnStyle = CreateHeaderButtonStyle();
+            var headerBtnStyle = CreateCustomButtonStyle("#1E293B", new Thickness(10, 4, 10, 4), HorizontalAlignment.Center, "#334155", hoverFg: "#F8FAFC");
 
             // SECTION 0: HEADER
             var headerGrid = new Grid();
@@ -1829,36 +1835,11 @@ namespace AGQuotaTracker
             headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
             _imgAppIcon = new System.Windows.Controls.Image();
-            _imgAppIcon.Width = 30;
-            _imgAppIcon.Height = 30;
+            _imgAppIcon.Width = 32;
+            _imgAppIcon.Height = 32;
             _imgAppIcon.Margin = new Thickness(0, 0, 10, 0);
             _imgAppIcon.VerticalAlignment = VerticalAlignment.Center;
-
-            string exeDir = AppDomain.CurrentDomain.BaseDirectory;
-            string pngPath = Path.Combine(exeDir, @"assets\icon.png");
-            if (File.Exists(pngPath))
-            {
-                var bi = new System.Windows.Media.Imaging.BitmapImage(new Uri(pngPath));
-                _imgAppIcon.Source = bi;
-            }
-            else
-            {
-                try
-                {
-                    using (var appIcon = GetEmbeddedAppIcon())
-                    {
-                        if (appIcon != null)
-                        {
-                            var imgSource = System.Windows.Interop.Imaging.CreateBitmapSourceFromHIcon(
-                                appIcon.Handle,
-                                Int32Rect.Empty,
-                                System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
-                            _imgAppIcon.Source = imgSource;
-                        }
-                    }
-                }
-                catch { }
-            }
+            UpdateAppHeaderGauge(100.0, 1.0, true);
             Grid.SetColumn(_imgAppIcon, 0);
             headerGrid.Children.Add(_imgAppIcon);
 
@@ -1898,19 +1879,19 @@ namespace AGQuotaTracker
             btnSp.Orientation = System.Windows.Controls.Orientation.Horizontal;
             btnSp.VerticalAlignment = VerticalAlignment.Center;
 
-            _btnRefresh = new Button();
-            _btnRefresh.Style = headerBtnStyle;
-            _btnRefresh.Content = "Refresh";
-            _btnRefresh.Margin = new Thickness(0, 0, 6, 0);
-            _btnRefresh.Click += delegate { UpdateData(); };
+            var btnRefresh = new Button();
+            btnRefresh.Style = headerBtnStyle;
+            btnRefresh.Content = "Refresh";
+            btnRefresh.Margin = new Thickness(0, 0, 6, 0);
+            btnRefresh.Click += delegate { UpdateData(); };
 
-            _btnClose = new Button();
-            _btnClose.Style = headerBtnStyle;
-            _btnClose.Content = "Close";
-            _btnClose.Click += delegate { Hide(); };
+            var btnClose = new Button();
+            btnClose.Style = headerBtnStyle;
+            btnClose.Content = "Close";
+            btnClose.Click += delegate { Hide(); };
 
-            btnSp.Children.Add(_btnRefresh);
-            btnSp.Children.Add(_btnClose);
+            btnSp.Children.Add(btnRefresh);
+            btnSp.Children.Add(btnClose);
             Grid.SetColumn(btnSp, 2);
             headerGrid.Children.Add(btnSp);
 
@@ -1985,7 +1966,7 @@ namespace AGQuotaTracker
 
             // Bottom Row: Dedicated Account Selector Bar
             _btnAccountSelect = new Button();
-            _btnAccountSelect.Style = CreateAccountButtonStyle();
+            _btnAccountSelect.Style = CreateCustomButtonStyle("#131C2E", new Thickness(10, 6, 10, 6), HorizontalAlignment.Stretch, "#1E293B", hoverBorder: "#475569");
             _btnAccountSelect.Margin = new Thickness(0, 8, 0, 0);
             _btnAccountSelect.HorizontalAlignment = HorizontalAlignment.Stretch;
             _btnAccountSelect.Click += delegate { ShowAccountContextMenu(); };
@@ -1995,14 +1976,14 @@ namespace AGQuotaTracker
             accBtnGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             accBtnGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            _txtAccountIcon = new TextBlock();
-            _txtAccountIcon.Text = "Account: ";
-            _txtAccountIcon.FontSize = 11;
-            _txtAccountIcon.Foreground = Brush("#64748B");
-            _txtAccountIcon.FontWeight = FontWeights.Medium;
-            _txtAccountIcon.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(_txtAccountIcon, 0);
-            accBtnGrid.Children.Add(_txtAccountIcon);
+            var txtAccountIcon = new TextBlock();
+            txtAccountIcon.Text = "Account: ";
+            txtAccountIcon.FontSize = 11;
+            txtAccountIcon.Foreground = Brush("#64748B");
+            txtAccountIcon.FontWeight = FontWeights.Medium;
+            txtAccountIcon.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(txtAccountIcon, 0);
+            accBtnGrid.Children.Add(txtAccountIcon);
 
             _txtUserEmail = new TextBlock();
             _txtUserEmail.Text = "Local Antigravity";
@@ -2032,13 +2013,13 @@ namespace AGQuotaTracker
             // SECTION 2: QUOTA CARDS
             var cardsSp = new StackPanel();
             var geminiCard = CreateQuotaCard("Gemini Models", "Flash, Pro",
-                out _txtGemini5hPct, out _barGemini5h, out _txtGemini5hReset,
-                out _txtGeminiWkPct, out _barGeminiWk, out _txtGeminiWkReset);
+                out _txtGemini5hPct, out _barGemini5h, out _txtGemini5hReset, out _txtGemini5hTime,
+                out _txtGeminiWkPct, out _barGeminiWk, out _txtGeminiWkReset, out _txtGeminiWkTime);
             cardsSp.Children.Add(geminiCard);
 
             var claudeCard = CreateQuotaCard("Claude & GPT Models", "Sonnet, Opus, GPT",
-                out _txtClaude5hPct, out _barClaude5h, out _txtClaude5hReset,
-                out _txtClaudeWkPct, out _barClaudeWk, out _txtClaudeWkReset);
+                out _txtClaude5hPct, out _barClaude5h, out _txtClaude5hReset, out _txtClaude5hTime,
+                out _txtClaudeWkPct, out _barClaudeWk, out _txtClaudeWkReset, out _txtClaudeWkTime);
             cardsSp.Children.Add(claudeCard);
 
             mainStack.Children.Add(cardsSp);
@@ -2099,19 +2080,19 @@ namespace AGQuotaTracker
             _notifyIcon.Text = "Antigravity Quota Monitor";
             _notifyIcon.Visible = true;
 
-            _contextMenu = new ContextMenuStrip();
-            var menuOpen = _contextMenu.Items.Add("Open Dashboard");
-            menuOpen.Font = new System.Drawing.Font(_contextMenu.Font, System.Drawing.FontStyle.Bold);
+            var contextMenu = new ContextMenuStrip();
+            var menuOpen = contextMenu.Items.Add("Open Dashboard");
+            menuOpen.Font = new System.Drawing.Font(contextMenu.Font, System.Drawing.FontStyle.Bold);
             menuOpen.Click += delegate { ShowDashboard(); };
 
-            _contextMenu.Items.Add("-");
+            contextMenu.Items.Add("-");
 
             _menuAccountsSub = new ToolStripMenuItem("Account / Source");
-            _contextMenu.Items.Add(_menuAccountsSub);
+            contextMenu.Items.Add(_menuAccountsSub);
 
-            _contextMenu.Items.Add("-");
+            contextMenu.Items.Add("-");
 
-            var menuRefresh = _contextMenu.Items.Add("Refresh Usage");
+            var menuRefresh = contextMenu.Items.Add("Refresh Usage");
             menuRefresh.Click += delegate { UpdateData(); };
 
             var menuInterval = new ToolStripMenuItem("Auto-Refresh Interval");
@@ -2141,9 +2122,9 @@ namespace AGQuotaTracker
                 ((ToolStripMenuItem)int300).Checked = true;
                 _refreshTimer.Interval = TimeSpan.FromSeconds(300);
             };
-            _contextMenu.Items.Add(menuInterval);
+            contextMenu.Items.Add(menuInterval);
 
-            _contextMenu.Items.Add("-");
+            contextMenu.Items.Add("-");
 
             _menuStartup = new ToolStripMenuItem("Start with Windows");
             _menuStartup.Checked = StartupManager.IsEnabled();
@@ -2154,14 +2135,14 @@ namespace AGQuotaTracker
                 _menuStartup.Checked = target;
                 if (_chkAutoStart != null) _chkAutoStart.IsChecked = target;
             };
-            _contextMenu.Items.Add(_menuStartup);
+            contextMenu.Items.Add(_menuStartup);
 
-            _contextMenu.Items.Add("-");
+            contextMenu.Items.Add("-");
 
-            var menuExit = _contextMenu.Items.Add("Exit");
+            var menuExit = contextMenu.Items.Add("Exit");
             menuExit.Click += delegate { ExitApplication(); };
 
-            _notifyIcon.ContextMenuStrip = _contextMenu;
+            _notifyIcon.ContextMenuStrip = contextMenu;
             _notifyIcon.Click += delegate(object sender, EventArgs e)
             {
                 var me = e as System.Windows.Forms.MouseEventArgs;
@@ -2341,10 +2322,48 @@ namespace AGQuotaTracker
                 }
             }
             catch { }
+            try
+            {
+                if (_currentDynamicIcon != null)
+                {
+                    _currentDynamicIcon.Dispose();
+                    _currentDynamicIcon = null;
+                }
+            }
+            catch { }
+            try
+            {
+                if (_baseLogoBitmap != null)
+                {
+                    _baseLogoBitmap.Dispose();
+                    _baseLogoBitmap = null;
+                }
+            }
+            catch { }
             try { ApiClient.StopHeadlessDaemon(); } catch { }
             try { Close(); } catch { }
             try { Application.Current.Shutdown(); } catch { }
             Environment.Exit(0);
+        }
+
+        private void UpdateQuotaSectionUI(QuotaModel model, TextBlock txtPct, Border bar, TextBlock txtReset, TextBlock txtTime, bool isCloudWeekly = false)
+        {
+            if (isCloudWeekly)
+            {
+                txtPct.Text = "--";
+                txtPct.Foreground = Brush("#64748B");
+                bar.Width = 0;
+                txtReset.Text = "Weekly pool only tracked in Local IDE";
+                txtTime.Text = "";
+                return;
+            }
+            txtPct.Text = string.Format("{0}%", model.Pct);
+            var brush = GetQuotaBrush(model.Remaining);
+            txtPct.Foreground = brush;
+            bar.Background = brush;
+            bar.Width = Math.Max(0, Math.Min(TrackWidth, TrackWidth * model.Remaining));
+            txtReset.Text = string.Format("Resets in {0}", model.ResetStr);
+            txtTime.Text = ApiClient.FormatLocalResetClock(model.ResetTime);
         }
 
         public void UpdateData()
@@ -2378,7 +2397,6 @@ namespace AGQuotaTracker
                                     _badgeSource.BorderBrush = Brush("#6D28D9");
                                     _txtSourceBadge.Foreground = Brush("#DDD6FE");
                                     _txtSourceBadge.Text = "CLOUD";
-                                    _txtAccountIcon.Text = "Account: ";
                                 }
                                 else
                                 {
@@ -2386,64 +2404,24 @@ namespace AGQuotaTracker
                                     _badgeSource.BorderBrush = Brush("#475569");
                                     _txtSourceBadge.Foreground = Brush("#94A3B8");
                                     _txtSourceBadge.Text = "LOCAL";
-                                    _txtAccountIcon.Text = "Account: ";
                                 }
 
                                 _txtPlanBadge.Text = (data.Plan ?? "PRO").ToUpper();
 
-                                // Gemini 5h
-                                _txtGemini5hPct.Text = string.Format("{0}%", data.Gemini5h.Pct);
-                                _txtGemini5hPct.Foreground = GetQuotaBrush(data.Gemini5h.Remaining);
-                                _barGemini5h.Background = GetQuotaBrush(data.Gemini5h.Remaining);
-                                _barGemini5h.Width = Math.Max(0, Math.Min(TrackWidth, TrackWidth * data.Gemini5h.Remaining));
-                                _txtGemini5hReset.Text = string.Format("Resets in {0}", data.Gemini5h.ResetStr);
+                                bool isCloud = data.SourceMode == "Cloud";
+                                UpdateQuotaSectionUI(data.Gemini5h, _txtGemini5hPct, _barGemini5h, _txtGemini5hReset, _txtGemini5hTime);
+                                UpdateQuotaSectionUI(data.GeminiWk, _txtGeminiWkPct, _barGeminiWk, _txtGeminiWkReset, _txtGeminiWkTime, isCloud);
+                                UpdateQuotaSectionUI(data.Claude5h, _txtClaude5hPct, _barClaude5h, _txtClaude5hReset, _txtClaude5hTime);
+                                UpdateQuotaSectionUI(data.ClaudeWk, _txtClaudeWkPct, _barClaudeWk, _txtClaudeWkReset, _txtClaudeWkTime, isCloud);
 
-                                // Gemini Weekly
-                                if (data.SourceMode == "Cloud")
-                                {
-                                    _txtGeminiWkPct.Text = "--";
-                                    _txtGeminiWkPct.Foreground = Brush("#64748B");
-                                    _barGeminiWk.Width = 0;
-                                    _txtGeminiWkReset.Text = "Weekly pool only tracked in Local IDE";
-                                }
-                                else
-                                {
-                                    _txtGeminiWkPct.Text = string.Format("{0}%", data.GeminiWk.Pct);
-                                    _txtGeminiWkPct.Foreground = GetQuotaBrush(data.GeminiWk.Remaining);
-                                    _barGeminiWk.Background = GetQuotaBrush(data.GeminiWk.Remaining);
-                                    _barGeminiWk.Width = Math.Max(0, Math.Min(TrackWidth, TrackWidth * data.GeminiWk.Remaining));
-                                    _txtGeminiWkReset.Text = string.Format("Resets in {0}", data.GeminiWk.ResetStr);
-                                }
-
-                                // Claude 5h
-                                _txtClaude5hPct.Text = string.Format("{0}%", data.Claude5h.Pct);
-                                _txtClaude5hPct.Foreground = GetQuotaBrush(data.Claude5h.Remaining);
-                                _barClaude5h.Background = GetQuotaBrush(data.Claude5h.Remaining);
-                                _barClaude5h.Width = Math.Max(0, Math.Min(TrackWidth, TrackWidth * data.Claude5h.Remaining));
-                                _txtClaude5hReset.Text = string.Format("Resets in {0}", data.Claude5h.ResetStr);
-
-                                // Claude Weekly
-                                if (data.SourceMode == "Cloud")
-                                {
-                                    _txtClaudeWkPct.Text = "--";
-                                    _txtClaudeWkPct.Foreground = Brush("#64748B");
-                                    _barClaudeWk.Width = 0;
-                                    _txtClaudeWkReset.Text = "Weekly pool only tracked in Local IDE";
-                                }
-                                else
-                                {
-                                    _txtClaudeWkPct.Text = string.Format("{0}%", data.ClaudeWk.Pct);
-                                    _txtClaudeWkPct.Foreground = GetQuotaBrush(data.ClaudeWk.Remaining);
-                                    _barClaudeWk.Background = GetQuotaBrush(data.ClaudeWk.Remaining);
-                                    _barClaudeWk.Width = Math.Max(0, Math.Min(TrackWidth, TrackWidth * data.ClaudeWk.Remaining));
-                                    _txtClaudeWkReset.Text = string.Format("Resets in {0}", data.ClaudeWk.ResetStr);
-                                }
-
-                                string srcLabel = data.SourceMode == "Cloud" ? "Cloud" : "Local";
+                                string srcLabel = isCloud ? "Cloud" : "Local";
                                 string tt = string.Format("Antigravity ({0})\nGemini: 5h {1}%\nClaude: 5h {2}%",
                                     srcLabel, data.Gemini5h.Pct, data.Claude5h.Pct);
                                 if (tt.Length > 63) tt = tt.Substring(0, 63);
                                 _notifyIcon.Text = tt;
+
+                                UpdateTrayGauge(data.Gemini5h.Pct, data.Gemini5h.Remaining, true);
+                                UpdateAppHeaderGauge(data.Gemini5h.Pct, data.Gemini5h.Remaining, true);
                             }
                             else
                             {
@@ -2452,22 +2430,21 @@ namespace AGQuotaTracker
                                 _txtStatus.Foreground = Brush("#EF4444");
                                 _txtUserEmail.Text = data.Error ?? "Connecting...";
                                 _notifyIcon.Text = "Antigravity Quota\nConnecting...";
+                                _txtGemini5hTime.Text = "";
+                                _txtGeminiWkTime.Text = "";
+                                _txtClaude5hTime.Text = "";
+                                _txtClaudeWkTime.Text = "";
+
+                                UpdateTrayGauge(0, 0, false);
+                                UpdateAppHeaderGauge(0, 0, false);
                             }
 
                             _txtLastUpdated.Text = string.Format("Updated: {0}", DateTime.Now.ToString("HH:mm:ss"));
                         }
-                        catch (Exception exUi)
-                        {
-                            string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "startup_debug.log");
-                            File.AppendAllText(logPath, "UpdateData UI EXCEPTION: " + exUi.ToString() + "\r\n");
-                        }
+                        catch { }
                     });
                 }
-                catch (Exception exWorker)
-                {
-                    string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "startup_debug.log");
-                    File.AppendAllText(logPath, "UpdateData Worker EXCEPTION: " + exWorker.ToString() + "\r\n");
-                }
+                catch { }
             });
         }
     }
